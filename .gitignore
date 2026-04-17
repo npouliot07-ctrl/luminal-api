@@ -8,6 +8,10 @@ __pycache__/
 # Streamlit secrets
 .streamlit/secrets.toml
 
+# Email cache / backups
+emails_cache.csv
+*.save
+
 # Local credentials / configs
 service_account.json
 .env
