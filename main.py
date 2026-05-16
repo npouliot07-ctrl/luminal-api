@@ -13,6 +13,8 @@ import gspread
 
 # Helper function to convert column number to letter
 def col_num_to_letter(n):
+    
+    
     result = ""
     while n > 0:
         n, remainder = divmod(n - 1, 26)
@@ -106,6 +108,7 @@ def read_sheet(sheet):
         "industrie": "Industry",
         "langue": "Language",
         "site internet": "URL"
+       
     }
     df.columns = [COLUMN_ALIASES.get(c.lower(), c) for c in df.columns]
     return df

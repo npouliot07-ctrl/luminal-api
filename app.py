@@ -11,6 +11,10 @@ from main import read_sheet, write_emails_to_sheet, update_courriel_column_only,
 
 # Helper function to convert column number to letter
 def col_num_to_letter(n):
+   
+   
+   
+   
    result = ""
    while n > 0:
        n, remainder = divmod(n - 1, 26)
