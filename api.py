@@ -1,4 +1,5 @@
 import openai
+import random
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -25,6 +26,44 @@ SIGNATURES = {
     },
 }
 
+
+def build_greeting(contact_name: str, company_name: str, is_french: bool) -> str:
+    """
+    Builds the opening greeting line deterministically instead of letting the
+    AI generate it — this guarantees the company/contact name is always used
+    exactly as it appears in the lead data (no paraphrasing, no capitalization
+    drift), while still varying naturally by language and by whether we have
+    a real person's name to address.
+    """
+    contact_name = (contact_name or "").strip()
+    company_name = (company_name or "").strip()
+
+    # A "real" contact name is one that's actually different from the company
+    # name — the frontend already falls back to company name when no personal
+    # contact exists, so contact_name == company_name means "no real person".
+    has_real_contact = bool(contact_name) and contact_name != company_name
+
+    if has_real_contact:
+        return f"Bonjour {contact_name}," if is_french else f"Hi {contact_name},"
+
+    # No real contact — greet the company/team instead.
+    company = company_name or contact_name or ("l'équipe" if is_french else "there")
+
+    if is_french:
+        options = [
+            f"Bonjour l'équipe de {company},",
+            f"Bonjour à l'équipe de {company},",
+            f"Bonjour {company},",
+        ]
+    else:
+        options = [
+            f"Hi {company},",
+            f"Hello {company},",
+            f"Hello the {company} team,",
+        ]
+    return random.choice(options)
+
+
 @app.post("/generate")
 def generate(data: dict):
     lead = data.get("lead", data)
@@ -39,6 +78,8 @@ def generate(data: dict):
     write_in = "French" if is_french else "English"
     generator_key = generator if generator in SIGNATURES else "Nathaniel Pouliot"
     signature = SIGNATURES[generator_key][lang_key]
+
+    greeting = build_greeting(contact_name, company_name, is_french)
 
     body_prompt = f"""
 You are an expert SEO strategist writing hyper-personalized cold emails for a high-end SEO agency.
@@ -64,21 +105,21 @@ INSTRUCTIONS:
 - Never say "I noticed your website" or "I came across your business"
 - Never mention SEO in the first sentence
 
+DO NOT include a greeting line — one has already been added separately. Start directly with the personalized observation.
+
 STRUCTURE AND FORMATTING:
-1. Start with: "Hi {contact_name}," on its own line
+1. Personalized observation about their business/industry (1-2 sentences)
 2. Blank line
-3. Personalized observation about their business/industry (1-2 sentences)
+3. Insight about what is likely missing or the opportunity (1-2 sentences)
 4. Blank line
-5. Insight about what is likely missing or the opportunity (1-2 sentences)
+5. Soft positioning and soft CTA — end with a question, not a pitch (1-2 sentences)
 6. Blank line
-7. Soft positioning and soft CTA — end with a question, not a pitch (1-2 sentences)
-8. Blank line
-9. Signature exactly as provided below
+7. Signature exactly as provided below
 
 SIGNATURE (use exactly as written):
 {signature}
 
-Generate ONLY the email body. No subject line. No explanations.
+Generate ONLY the email body, starting from the personalized observation (no greeting, no subject line, no explanations).
 """
 
     subject_prompt = f"""
@@ -113,7 +154,8 @@ Return ONLY the subject line, nothing else. No quotes around it.
         max_tokens=40
     )
 
-    body = body_response.choices[0].message.content.strip()
+    ai_body = body_response.choices[0].message.content.strip()
+    body = f"{greeting}\n\n{ai_body}"
     subject = subject_response.choices[0].message.content.strip().strip('"').strip("'")
 
     return {"subject": subject, "body": body}
