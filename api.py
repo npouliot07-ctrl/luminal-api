@@ -1,8 +1,11 @@
 import openai
 import random
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import json
 import os
+import requests
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
@@ -14,6 +17,111 @@ app.add_middleware(
 )
 
 openai.api_key = os.environ.get("OPENAI_API_KEY", "")
+
+# ─── Microsoft OAuth (confidential client — backend holds the secret) ─────────
+#
+# The frontend used to talk to Microsoft's token endpoint directly, which only
+# works for apps registered as "Single-page application" in Azure — and SPA
+# registrations get refresh tokens capped at 24 hours, by Microsoft design.
+# Moving the token exchange here, behind a "Web" platform registration with a
+# client secret, gets the normal ~90-day sliding-window refresh tokens instead.
+# The secret never reaches the browser — only this server ever sees it.
+
+MS_CLIENT_ID = os.environ.get("MS_CLIENT_ID", "ffcaea26-e142-4daf-aeb7-e6751f5937dd")
+MS_CLIENT_SECRET = os.environ.get("MS_CLIENT_SECRET", "")
+MS_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+MS_SCOPES = "Mail.ReadWrite Mail.Send User.Read offline_access"
+
+
+def _redirect_uri_for(request: Request) -> str:
+    # Derives the redirect URI from whatever host actually received the
+    # request, so the same code works unmodified on localhost and on Render.
+    return f"{request.url.scheme}://{request.url.netloc}/auth/callback"
+
+
+def _popup_close_html(payload: dict) -> str:
+    """Tiny page that hands the result back to the window that opened the
+    popup (via postMessage) and closes itself — mirrors the message-based
+    handshake the frontend was already using."""
+    return f"""<!DOCTYPE html>
+<html><body style="font-family: sans-serif; padding: 2rem; color: #333;">
+<script>
+  if (window.opener) {{
+    window.opener.postMessage({json.dumps(payload)}, "*");
+  }}
+  window.close();
+</script>
+<p>{"Connected — you can close this window." if payload.get("type") == "ms_auth_success" else "Authentication failed — you can close this window."}</p>
+</body></html>"""
+
+
+@app.get("/auth/callback")
+def auth_callback(request: Request, code: str = None, error: str = None, error_description: str = None):
+    if error:
+        return HTMLResponse(_popup_close_html({
+            "type": "ms_auth_error",
+            "error": error_description or error,
+        }))
+
+    if not MS_CLIENT_SECRET:
+        return HTMLResponse(_popup_close_html({
+            "type": "ms_auth_error",
+            "error": "Server is missing MS_CLIENT_SECRET — set it as an environment variable.",
+        }))
+
+    redirect_uri = _redirect_uri_for(request)
+    token_res = requests.post(MS_TOKEN_URL, data={
+        "client_id": MS_CLIENT_ID,
+        "client_secret": MS_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "scope": MS_SCOPES,
+    })
+    token_data = token_res.json()
+
+    if not token_res.ok:
+        return HTMLResponse(_popup_close_html({
+            "type": "ms_auth_error",
+            "error": token_data.get("error_description", "Token exchange failed"),
+        }))
+
+    return HTMLResponse(_popup_close_html({
+        "type": "ms_auth_success",
+        "accessToken": token_data["access_token"],
+        "refreshToken": token_data.get("refresh_token", ""),
+        "expiresIn": token_data.get("expires_in", 3600),
+    }))
+
+
+@app.post("/auth/refresh")
+def auth_refresh(data: dict):
+    refresh_token = data.get("refreshToken", "")
+    if not refresh_token:
+        return {"error": "Missing refreshToken"}
+    if not MS_CLIENT_SECRET:
+        return {"error": "Server is missing MS_CLIENT_SECRET — set it as an environment variable."}
+
+    token_res = requests.post(MS_TOKEN_URL, data={
+        "client_id": MS_CLIENT_ID,
+        "client_secret": MS_CLIENT_SECRET,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "scope": MS_SCOPES,
+    })
+    token_data = token_res.json()
+
+    if not token_res.ok:
+        return {"error": token_data.get("error_description", "Token refresh failed")}
+
+    return {
+        "accessToken": token_data["access_token"],
+        "refreshToken": token_data.get("refresh_token", refresh_token),
+        "expiresIn": token_data.get("expires_in", 3600),
+    }
+
+
+# ─── Existing email generation endpoint (unchanged) ────────────────────────────
 
 SIGNATURES = {
     "Nathaniel Pouliot": {
@@ -38,15 +146,11 @@ def build_greeting(contact_name: str, company_name: str, is_french: bool) -> str
     contact_name = (contact_name or "").strip()
     company_name = (company_name or "").strip()
 
-    # A "real" contact name is one that's actually different from the company
-    # name — the frontend already falls back to company name when no personal
-    # contact exists, so contact_name == company_name means "no real person".
     has_real_contact = bool(contact_name) and contact_name != company_name
 
     if has_real_contact:
         return f"Bonjour {contact_name}," if is_french else f"Hi {contact_name},"
 
-    # No real contact — greet the company/team instead.
     company = company_name or contact_name or ("l'équipe" if is_french else "there")
 
     if is_french:
